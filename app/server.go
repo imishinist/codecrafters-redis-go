@@ -6,7 +6,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -128,8 +130,56 @@ func (p *RequestParser) Parse() (Command, error) {
 }
 
 var (
-	storage = make(map[string]string)
+	storage = NewStorage()
 )
+
+type StorageEntry struct {
+	Value  string
+	Expire *time.Time
+}
+
+func NewStorage() *Storage {
+	return &Storage{
+		data: make(map[string]StorageEntry),
+	}
+}
+
+type Storage struct {
+	data map[string]StorageEntry
+}
+
+func (s *Storage) now() time.Time {
+	return time.Now()
+}
+
+func (s *Storage) Set(key string, value string, expire time.Duration) {
+	entry := StorageEntry{
+		Value:  value,
+		Expire: nil,
+	}
+	if expire != time.Duration(0) {
+		expireDate := s.now().Add(expire)
+		entry.Expire = &expireDate
+	}
+	s.data[key] = entry
+}
+
+func (s *Storage) Get(key string) *string {
+	entry, ok := s.data[key]
+	if !ok {
+		return nil
+	}
+	if entry.Expire == nil {
+		return &entry.Value
+	}
+
+	now := s.now()
+	if now.After(*entry.Expire) {
+		delete(s.data, key)
+		return nil
+	}
+	return &entry.Value
+}
 
 func handlePing(conn net.Conn, command Command) error {
 	writeMessage(conn, "PONG")
@@ -147,11 +197,29 @@ func handleEcho(conn net.Conn, command Command) error {
 }
 
 func handleSet(conn net.Conn, command Command) error {
-	if len(command) != 3 {
+	if len(command) != 3 && len(command) != 5 {
 		writeError(conn, "wrong number of arguments for 'set' command")
 		return nil
 	}
-	storage[string(command[1])] = string(command[2])
+
+	var (
+		key    = string(command[1])
+		value  = string(command[2])
+		expire = time.Duration(0)
+	)
+	if len(command) == 5 {
+		if strings.ToUpper(string(command[3])) != "PX" {
+			writeError(conn, "4th arguments should be PX")
+			return nil
+		}
+		exp, err := strconv.Atoi(string(command[4]))
+		if err != nil {
+			writeError(conn, fmt.Errorf("expire parse error: %w", err).Error())
+			return nil
+		}
+		expire = time.Millisecond * time.Duration(exp)
+	}
+	storage.Set(key, value, expire)
 	writeMessage(conn, "OK")
 	return nil
 }
@@ -161,13 +229,13 @@ func handleGet(conn net.Conn, command Command) error {
 		writeError(conn, "wrong number of arguments for 'get' command")
 		return nil
 	}
-	value, ok := storage[string(command[1])]
-	if !ok {
+	value := storage.Get(string(command[1]))
+	if value == nil {
 		conn.Write([]byte("$-1\r\n"))
 		return nil
 	}
 	// TODO: レスポンス用の型を定義する
-	writeMessage(conn, value)
+	writeMessage(conn, *value)
 	return nil
 }
 
