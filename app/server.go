@@ -126,28 +126,70 @@ func (p *RequestParser) Parse() (Command, error) {
 }
 
 func handlePing(conn net.Conn, command Command) error {
-	if _, err := conn.Write([]byte("+PONG\r\n")); err != nil {
-		return err
-	}
+	writeMessage(conn, "PONG")
 	return nil
 }
 
 func handleEcho(conn net.Conn, command Command) error {
 	if len(command) != 2 {
-		if _, err := conn.Write([]byte("-ERR wrong number of arguments for 'ping' command\r\n")); err != nil {
-			return err
-		}
+		writeError(conn, "wrong number of arguments for 'ping' command")
 		return nil
 	}
 
-	ret := fmt.Appendf(nil, "+%s\r\n", command[1])
-	if _, err := conn.Write(ret); err != nil {
-		return err
+	writeMessage(conn, string(command[1]))
+	return nil
+}
+
+func writeMessage(conn net.Conn, message string) {
+	if _, err := conn.Write(fmt.Appendf(nil, "+%s\r\n", message)); err != nil {
+		log.Println("write message error")
+		return
+	}
+}
+
+func writeError(conn net.Conn, response string) {
+	log.Println(response)
+	if _, err := conn.Write(fmt.Appendf(nil, "-ERR %s\r\n", response)); err != nil {
+		log.Println("write error response error:", err)
+		return
+	}
+}
+
+func handleMessage(conn net.Conn, input []byte) error {
+	parser := NewRequestParser(input)
+	command, err := parser.Parse()
+	if err != nil {
+		writeError(conn, fmt.Sprintf("parse input error: %s", err.Error()))
+		return nil
+	}
+
+	if len(command) == 0 {
+		writeError(conn, "empty command")
+		return nil
+	}
+
+	switch strings.ToUpper(string(command[0])) {
+	case CmdPing:
+		if err := handlePing(conn, command); err != nil {
+			log.Println(err)
+			return nil
+		}
+	case CmdEcho:
+		if err := handleEcho(conn, command); err != nil {
+			log.Println(err)
+			return nil
+		}
+	case CmdCommand:
+		writeMessage(conn, "OK")
+	default:
+		writeError(conn, "unknown command")
 	}
 	return nil
 }
 
-func handleRequest(conn net.Conn) {
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	// main-loop
 	for {
 		buf := make([]byte, 64)
 		n, err := conn.Read(buf)
@@ -160,41 +202,10 @@ func handleRequest(conn net.Conn) {
 			return
 		}
 
-		parser := NewRequestParser(buf[:n])
-		command, err := parser.Parse()
-		if err != nil {
-			fmt.Println("Error parse input:", err.Error())
+		if err := handleMessage(conn, buf[:n]); err != nil {
+			log.Println("handle message error:", err)
+			log.Println("closing connection")
 			return
-		}
-		if len(command) == 0 {
-			if _, err := conn.Write([]byte("-Err empty command\r\n")); err != nil {
-				log.Println(err)
-				return
-			}
-			continue
-		}
-
-		switch strings.ToUpper(string(command[0])) {
-		case CmdPing:
-			if err := handlePing(conn, command); err != nil {
-				fmt.Println(err.Error())
-				return
-			}
-		case CmdEcho:
-			if err := handleEcho(conn, command); err != nil {
-				fmt.Println(err.Error())
-				return
-			}
-		case CmdCommand:
-			if _, err := conn.Write([]byte("+OK\r\n")); err != nil {
-				fmt.Println(err.Error())
-				return
-			}
-		default:
-			if _, err := conn.Write([]byte("-Err unknown command\r\n")); err != nil {
-				fmt.Println(err.Error())
-				return
-			}
 		}
 	}
 }
@@ -213,6 +224,6 @@ func main() {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-		go handleRequest(conn)
+		go handleConnection(conn)
 	}
 }
