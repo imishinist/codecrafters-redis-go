@@ -13,6 +13,8 @@ const (
 	CmdPing    = "PING"
 	CmdEcho    = "ECHO"
 	CmdCommand = "COMMAND"
+	CmdSet     = "SET"
+	CmdGet     = "GET"
 )
 
 type CommandEntity string
@@ -125,6 +127,10 @@ func (p *RequestParser) Parse() (Command, error) {
 	return parsed, nil
 }
 
+var (
+	storage = make(map[string]string)
+)
+
 func handlePing(conn net.Conn, command Command) error {
 	writeMessage(conn, "PONG")
 	return nil
@@ -137,6 +143,31 @@ func handleEcho(conn net.Conn, command Command) error {
 	}
 
 	writeMessage(conn, string(command[1]))
+	return nil
+}
+
+func handleSet(conn net.Conn, command Command) error {
+	if len(command) != 3 {
+		writeError(conn, "wrong number of arguments for 'set' command")
+		return nil
+	}
+	storage[string(command[1])] = string(command[2])
+	writeMessage(conn, "OK")
+	return nil
+}
+
+func handleGet(conn net.Conn, command Command) error {
+	if len(command) != 2 {
+		writeError(conn, "wrong number of arguments for 'get' command")
+		return nil
+	}
+	value, ok := storage[string(command[1])]
+	if !ok {
+		conn.Write([]byte("$-1\r\n"))
+		return nil
+	}
+	// TODO: レスポンス用の型を定義する
+	writeMessage(conn, value)
 	return nil
 }
 
@@ -176,6 +207,16 @@ func handleMessage(conn net.Conn, input []byte) error {
 		}
 	case CmdEcho:
 		if err := handleEcho(conn, command); err != nil {
+			log.Println(err)
+			return nil
+		}
+	case CmdSet:
+		if err := handleSet(conn, command); err != nil {
+			log.Println(err)
+			return nil
+		}
+	case CmdGet:
+		if err := handleGet(conn, command); err != nil {
 			log.Println(err)
 			return nil
 		}
