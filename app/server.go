@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,71 +28,97 @@ func NewRequestParser(input []byte) *RequestParser {
 type RequestParser struct {
 	input   []byte
 	pointer uint
+
+	err error
 }
 
-func (p *RequestParser) number() (int, error) {
+func (p *RequestParser) current() byte {
+	p.pointerRangeCheck()
+	if p.err != nil {
+		return 0
+	}
+	return p.input[p.pointer]
+}
+
+func (p *RequestParser) pointerRangeCheck() {
+	if p.err != nil {
+		return
+	}
+	if int(p.pointer) >= len(p.input) {
+		p.err = fmt.Errorf("pointer overflow")
+	}
+}
+
+// expect consume pointer
+func (p *RequestParser) expect(b byte) {
+	if p.err != nil {
+		return
+	}
+
+	if p.current() != b {
+		p.err = fmt.Errorf("expected: '%c'", b)
+	}
+	p.pointer++
+}
+
+func (p *RequestParser) expects(bs []byte) {
+	if p.err != nil {
+		return
+	}
+
+	for _, b := range bs {
+		p.expect(b)
+	}
+}
+
+func (p *RequestParser) number() int {
+	if p.err != nil {
+		return 0
+	}
 	num := 0
 	for {
-		if int(p.pointer) >= len(p.input) {
-			return 0, errors.New("pointer overflow")
-		}
-		if '0' > p.input[p.pointer] || p.input[p.pointer] > '9' {
+		current := p.current()
+		if '0' > current || current > '9' {
 			break
 		}
 		num *= 10
-		num += int(p.input[p.pointer]) - '0'
+		num += int(current) - '0'
 		p.pointer++
 	}
-	// expects '\r' '\n'
-	if p.input[p.pointer] != '\r' {
-		return 0, errors.New("expect '\\r'")
+	p.expect('\r')
+	p.expect('\n')
+	return num
+}
+
+// slice consume pointer
+func (p *RequestParser) slice(n uint) []byte {
+	if len(p.input) < int(p.pointer+n) {
+		p.err = fmt.Errorf("index out of range: %d", n)
+		return nil
 	}
-	p.pointer++
-	if p.input[p.pointer] != '\n' {
-		return 0, errors.New("expect '\\n'")
-	}
-	p.pointer++
-	return num, nil
+	ret := p.input[p.pointer : p.pointer+n]
+	p.pointer += n
+	return ret
 }
 
 func (p *RequestParser) Parse() (Command, error) {
 	log.Printf("rawMessage = %q\n", p.input)
-	if p.input[p.pointer] != '*' {
-		return nil, errors.New("invalid argument: expected: '*'")
-	}
-	p.pointer++
 
-	numArg, err := p.number()
-	if err != nil {
-		return nil, fmt.Errorf("invalid argument: %w", err)
+	p.expect('*')
+	numArg := p.number()
+	if p.err != nil {
+		return nil, fmt.Errorf("invalid argument: %w", p.err)
 	}
-
 	parsed := make([]CommandEntity, 0, numArg)
 	for i := 0; i < numArg; i++ {
-		if p.input[p.pointer] != '$' {
-			return nil, errors.New("invalid argument: expected: '$'")
+		p.expect('$')
+		num := p.number()
+		slice := p.slice(uint(num))
+		if p.err != nil {
+			return nil, fmt.Errorf("invalid argument: %w", p.err)
 		}
-		p.pointer++
-
-		num, err := p.number()
-		if err != nil {
-			return nil, fmt.Errorf("invalid argument: %w", err)
-		}
-
-		// get num bytes
-		if len(p.input) < int(p.pointer)+num {
-			return nil, fmt.Errorf("invalid argument: number is invalid: %d", num)
-		}
-		parsed = append(parsed, CommandEntity(p.input[p.pointer:p.pointer+uint(num)]))
-		p.pointer += uint(num)
-		if p.input[p.pointer] != '\r' {
-			return nil, errors.New("expect '\\r'")
-		}
-		p.pointer++
-		if p.input[p.pointer] != '\n' {
-			return nil, errors.New("expect '\\n'")
-		}
-		p.pointer++
+		parsed = append(parsed, CommandEntity(slice))
+		p.expects([]byte("\r\n"))
 	}
 	log.Printf("%q: %d\n", parsed, len(parsed))
 
@@ -140,6 +165,13 @@ func handleRequest(conn net.Conn) {
 		if err != nil {
 			fmt.Println("Error parse input:", err.Error())
 			return
+		}
+		if len(command) == 0 {
+			if _, err := conn.Write([]byte("-Err empty command\r\n")); err != nil {
+				log.Println(err)
+				return
+			}
+			continue
 		}
 
 		switch strings.ToUpper(string(command[0])) {
